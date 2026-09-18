@@ -92,12 +92,13 @@ module OKF
       def initialize(graph, title: nil, link: nil, layout: "cose", node_endpoint: "node", meta_endpoint: "node/meta", embed: nil,
                      siblings: nil, self_slug: nil, hub_path: nil, search_endpoint: nil,
                      manage_root: nil, manage_token: nil, cuts: nil, map: false, init_view: nil,
-                     graphdata_endpoint: nil)
+                     graphdata_endpoint: nil, layoutcache_endpoint: nil)
         @graph = graph
         @cuts = cuts
         @map = map
         @init_view = init_view
         @graphdata_endpoint = graphdata_endpoint
+        @layoutcache_endpoint = layoutcache_endpoint
         @title = title
         @link = link
         @layout = layout
@@ -222,6 +223,14 @@ module OKF
       # clicked. Allows the server to respond immediately on --view <non-graph>.
       def graphdata_endpoint_json
         json_for_script(@graphdata_endpoint)
+      end
+
+      # The /layoutcache endpoint, mount-relative — null when layout positions
+      # are not persisted (inline graph mode). When set, the client POSTs
+      # Cytoscape positions after layout and GETs them on the next visit to
+      # skip the layout run entirely.
+      def layoutcache_endpoint_json
+        json_for_script(@layoutcache_endpoint)
       end
 
       # Behind a hub the mark is a link back to the bundle list — "../" reaches

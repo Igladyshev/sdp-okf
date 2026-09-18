@@ -1250,6 +1250,11 @@ const SEARCH_ENDPOINT=<%= search_endpoint_json %>;
    When set, the page boots with empty NODES/EDGES and populates the graph
    lazily on the first visit to the Graph rail. */
 const GRAPHDATA_ENDPOINT=<%= graphdata_endpoint_json %>;
+/* /layoutcache endpoints — null when layout persistence is not available.
+   GET returns {positions:{id:{x,y}}} or {positions:null} on a miss.
+   POST accepts {positions:{id:{x,y}}} and writes them to disk keyed by the
+   bundle fingerprint, so a stale cache (edited files) is never applied. */
+const LAYOUTCACHE_ENDPOINT=<%= layoutcache_endpoint_json %>;
 /* The hub root, mount-relative — where the Bundles panel reads /bundles and
    posts /registry/<verb>. Null for a standalone server and for `okf render`,
    and that null is the gate: neither has a registry behind it, so neither ever
@@ -2252,20 +2257,18 @@ let _graphLoading=null;
    fetching and the layout is running, so the reader knows the work is in
    progress and cannot trigger a second load. */
 const _graphRailBtn=document.querySelector('.rail-item[data-view="graph"]');
-function _graphLoadStart(){
+function _graphLoadStart(cached){
  if(!_graphRailBtn)return;
  _graphRailBtn.disabled=true;
  const lbl=_graphRailBtn.querySelector('.ri-lbl');
  if(lbl)lbl.textContent='Loading…';
- /* Show a centered message on the canvas so the reader knows why it is blank. */
  const cy_el=document.getElementById('cy');
  if(cy_el&&!cy_el.querySelector('.cy-loading')){
   const msg=document.createElement('div');
   msg.className='cy-loading';
-  msg.textContent='Building graph…';
+  msg.textContent=cached?'Restoring graph…':'Building graph…';
   msg.style.cssText='position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--muted);pointer-events:none;z-index:4';
-  cy_el.appendChild(msg);};}
-function _graphLoadEnd(){
+  cy_el.appendChild(msg);};}function _graphLoadEnd(){
  if(!_graphRailBtn)return;
  _graphRailBtn.disabled=false;
  const lbl=_graphRailBtn.querySelector('.ri-lbl');
@@ -2276,7 +2279,14 @@ function loadGraphData(){
  if(_graphLoaded)return Promise.resolve();
  if(_graphLoading)return _graphLoading;
  _graphLoadStart();
- _graphLoading=fetch(GRAPHDATA_ENDPOINT).then(r=>r.json()).then(d=>{
+ /* Fetch graph data and cached layout positions in parallel. */
+ const fetches=[fetch(GRAPHDATA_ENDPOINT).then(r=>r.json())];
+ if(LAYOUTCACHE_ENDPOINT)fetches.push(fetch(LAYOUTCACHE_ENDPOINT).then(r=>r.json()).catch(()=>({positions:null})));
+ _graphLoading=Promise.all(fetches).then(([d,lc])=>{
+  const cachedPositions=(lc&&lc.positions&&Object.keys(lc.positions).length)?lc.positions:null;
+  /* Update canvas message now that we know whether positions are cached. */
+  const cyMsg=document.getElementById('cy')&&document.getElementById('cy').querySelector('.cy-loading');
+  if(cyMsg)cyMsg.textContent=cachedPositions?'Restoring graph…':'Building graph (first time, may take a moment)…';
   /* Populate the module-level arrays so the rest of the page (filters, search,
      stats, catalog links to nodes) all work exactly as if the data were inlined. */
   NODES.push(...(d.nodes||[]));
@@ -2289,17 +2299,30 @@ function loadGraphData(){
   Object.entries(TAGS).forEach(([t,ids])=>ids.forEach(id=>{(tagsOf[id]=tagsOf[id]||[]).push(t);}));
   const cuts=d.edge_cut||null;
   const edgeEls2=(d.edges||[]).map((e,i)=>({data:{source:e.source,target:e.target,cut:(cuts&&cuts.length===(d.edges||[]).length?cuts[i]:0)}}));
-  cy.batch(()=>{
-   cy.add([...(d.nodes||[]).map(n=>({data:{id:n.id,title:n.title,c:color[typeOf[n.id]||'Untyped']||'#64748b',sz:szOf(n.id)}})),...edgeEls2]);
-   applyGraphFilter();});
-  /* Yield to the browser so the loading message paints before the layout
-     blocks the main thread. The layout itself is unavoidably synchronous for
-     the cose algorithm on large bundles. */
-  return new Promise(res=>setTimeout(res,0));
+  if(cachedPositions){
+   /* Cache hit: add nodes at their saved positions, skip the layout run. */
+   cy.batch(()=>{
+    cy.add([...(d.nodes||[]).map(n=>{const pos=cachedPositions[n.id]||{x:0,y:0};
+     return {data:{id:n.id,title:n.title,c:color[typeOf[n.id]||'Untyped']||'#64748b',sz:szOf(n.id)},position:pos};}),...edgeEls2]);
+    applyGraphFilter();});
+   _graphLoaded=true;
+   _graphLoadEnd();
+  }else{
+   /* Cache miss: add nodes, yield to browser so the loading label paints,
+      then run the layout and save positions for next time. */
+   cy.batch(()=>{
+    cy.add([...(d.nodes||[]).map(n=>({data:{id:n.id,title:n.title,c:color[typeOf[n.id]||'Untyped']||'#64748b',sz:szOf(n.id)}})),...edgeEls2]);
+    applyGraphFilter();});
+   return new Promise(res=>setTimeout(res,0));}
  }).then(()=>{
+  if(_graphLoaded)return; /* cache-hit path already finished above */
   cy.layout({name:'<%= @layout %>',animate:false,nodeRepulsion:9000,idealEdgeLength:170,padding:40,nodeOverlap:24,avoidOverlap:true,spacingFactor:1.2,nodeDimensionsIncludeLabels:true}).run();
   _graphLoaded=true;
   _graphLoadEnd();
+  /* Save positions to disk so the next visit skips this layout run. */
+  if(LAYOUTCACHE_ENDPOINT){
+   const pos={};cy.nodes().forEach(n=>{const p=n.position();pos[n.id()]={x:Math.round(p.x),y:Math.round(p.y)};});
+   fetch(LAYOUTCACHE_ENDPOINT,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({positions:pos})}).catch(()=>{});}
  }).catch(()=>{_graphLoading=null;_graphLoadEnd();});
  return _graphLoading;}
 function setView(v){if(v===view)return;view=v;document.getElementById('app').setAttribute('data-view',v);

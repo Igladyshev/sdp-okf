@@ -3,6 +3,7 @@
 require "rack"
 
 require "okf/render/graph"
+require "okf/bundle/graph_cache"
 
 module OKF
   module Server
@@ -114,6 +115,13 @@ module OKF
 
       def call(env)
         request = Rack::Request.new(env)
+
+        # Layout cache is the one writable endpoint — a POST that stores
+        # Cytoscape positions so the next page load skips the layout run.
+        if request.path_info == "/layoutcache"
+          return request.post? ? save_layout(request) : respond_json(load_layout)
+        end
+
         return not_found unless request.get?
 
         case request.path_info
@@ -191,24 +199,36 @@ module OKF
             g, title: @title || @folder.name, link: @link, layout: @layout,
             siblings: @siblings, self_slug: @self_slug, hub_path: @hub_path, search_endpoint: @search_endpoint,
             manage_root: @manage_root, manage_token: @manage_token, cuts: cuts, map: @map,
-            init_view: @init_view, graphdata_endpoint: (lazy ? "graphdata" : nil)
+            init_view: @init_view, graphdata_endpoint: (lazy ? "graphdata" : nil),
+            layoutcache_endpoint: (lazy ? "layoutcache" : nil)
           ).render
         end
       end
 
       # The graph payload the client fetches lazily when --view defers graph
       # building. Provides the same data nodes_json/edges_json/types_json/tags_json
-      # would have inlined, plus edge_cut for the spine split. Called on demand,
-      # so the cost lands on the first graph visit rather than at server boot.
+      # would have inlined, plus edge_cut for the spine split.
+      #
+      # Served from a disk cache keyed by bundle fingerprint (max .md mtime).
+      # A cache hit skips the graph build entirely; a miss rebuilds, writes the
+      # cache, and memoizes the result in RAM for subsequent requests this run.
       def graphdata
-        g = graph
-        {
-          "nodes" => g.nodes,
-          "edges" => g.edges,
-          "types" => g.type_index,
-          "tags"  => g.tag_index,
-          "edge_cut" => skeleton.cuts_for(g.edges)
-        }
+        @graphdata ||= begin
+          if (cached = graph_cache.read)
+            cached
+          else
+            g = graph
+            payload = {
+              "nodes"    => g.nodes,
+              "edges"    => g.edges,
+              "types"    => g.type_index,
+              "tags"     => g.tag_index,
+              "edge_cut" => skeleton.cuts_for(g.edges)
+            }
+            graph_cache.write(payload)
+            payload
+          end
+        end
       end
 
       def node_body(id)
@@ -282,6 +302,43 @@ module OKF
       # for the whole corpus.
       def search_corpus
         @search_corpus ||= OKF::Bundle::Search.prepare([ [ nil, @folder.bundle ] ], engine: SEARCH_ENGINE)
+      end
+
+      def graph_cache
+        @graph_cache ||= OKF::Bundle::GraphCache.new(@folder.root)
+      end
+
+      # Layout cache: { "positions" => { id => {x,y} }, "fingerprint" => int }
+      # stored at .okf-cache/layout.json. Returns null positions on any miss so
+      # the client falls back to running the layout algorithm.
+      def load_layout
+        cache_path = File.join(@folder.root, OKF::Bundle::GraphCache::DIR, "layout.json")
+        return { "positions" => nil } unless File.exist?(cache_path)
+
+        raw = JSON.parse(File.read(cache_path, encoding: "UTF-8"))
+        fp  = graph_cache.fingerprint
+        raw["fingerprint"] == fp ? { "positions" => raw["positions"] } : { "positions" => nil }
+      rescue StandardError
+        { "positions" => nil }
+      end
+
+      # Accepts { positions: { id => {x,y} } } from the client and writes it
+      # to disk alongside the current bundle fingerprint. Returns 204 No Content.
+      def save_layout(request)
+        body = JSON.parse(request.body.read)
+        positions = body["positions"]
+        return [ 400, { "content-type" => "text/plain" }, [ "bad request\n" ] ] unless positions.is_a?(Hash)
+
+        fp = graph_cache.fingerprint
+        cache_dir = File.join(@folder.root, OKF::Bundle::GraphCache::DIR)
+        cache_path = File.join(cache_dir, "layout.json")
+        FileUtils.mkdir_p(cache_dir)
+        tmp = "#{cache_path}.tmp.#{Process.pid}"
+        File.write(tmp, JSON.generate({ "fingerprint" => fp, "positions" => positions }), encoding: "UTF-8")
+        File.rename(tmp, cache_path)
+        [ 204, {}, [] ]
+      rescue StandardError
+        [ 204, {}, [] ]
       end
 
       def respond_json(object)
