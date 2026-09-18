@@ -89,12 +89,13 @@ module OKF
       # default would have pointed its palette at the host's root instead. The
       # route answers either way — advertising it is the caller's call.
       def initialize(folder, title: nil, link: nil, layout: "cose", siblings: nil, self_slug: nil, hub_path: nil,
-                     search_endpoint: nil, manage_root: nil, manage_token: nil, map: false)
+                     search_endpoint: nil, manage_root: nil, manage_token: nil, map: false, init_view: nil)
         @folder = folder
         @title = title
         @link = link
         @layout = layout
         @map = map
+        @init_view = init_view
         @siblings = siblings
         @self_slug = self_slug
         @hub_path = hub_path
@@ -124,6 +125,7 @@ module OKF
         when "/types" then respond_json(graph.type_index)
         when "/index" then respond_json(directory_index)
         when "/log" then respond_json(logs)
+        when "/graphdata" then respond_json(graphdata)
         when "/search" then respond_json(self.class.search_payload(search_corpus, request.params["q"]))
         else not_found
         end
@@ -157,6 +159,13 @@ module OKF
         { directories: @folder.directory_index }
       end
 
+      # A zero-node, zero-edge graph used when graph data is deferred to /graphdata.
+      # Gives Render::Graph a valid object to call #nodes/#edges/#type_index/#tag_index
+      # on without touching the bundle.
+      def nil_graph
+        OKF::Bundle::Graph.new(nodes: [], edges: [], type_index: {}, tag_index: {})
+      end
+
       # The §9 history the Log panel renders: every log.md with its content, root
       # scope first, read live from disk. Built by OKF::Bundle::Folder#log_entries,
       # shared with `okf render`'s bake so the served and baked logs cannot drift.
@@ -174,11 +183,32 @@ module OKF
       end
 
       def page
-        @page ||= OKF::Render::Graph.new(
-          graph, title: @title || @folder.name, link: @link, layout: @layout,
-          siblings: @siblings, self_slug: @self_slug, hub_path: @hub_path, search_endpoint: @search_endpoint,
-          manage_root: @manage_root, manage_token: @manage_token, cuts: skeleton.cuts_for(graph.edges), map: @map
-        ).render
+        @page ||= begin
+          lazy = !@init_view.nil?
+          g = lazy ? nil_graph : graph
+          cuts = lazy ? nil : skeleton.cuts_for(g.edges)
+          OKF::Render::Graph.new(
+            g, title: @title || @folder.name, link: @link, layout: @layout,
+            siblings: @siblings, self_slug: @self_slug, hub_path: @hub_path, search_endpoint: @search_endpoint,
+            manage_root: @manage_root, manage_token: @manage_token, cuts: cuts, map: @map,
+            init_view: @init_view, graphdata_endpoint: (lazy ? "graphdata" : nil)
+          ).render
+        end
+      end
+
+      # The graph payload the client fetches lazily when --view defers graph
+      # building. Provides the same data nodes_json/edges_json/types_json/tags_json
+      # would have inlined, plus edge_cut for the spine split. Called on demand,
+      # so the cost lands on the first graph visit rather than at server boot.
+      def graphdata
+        g = graph
+        {
+          "nodes" => g.nodes,
+          "edges" => g.edges,
+          "types" => g.type_index,
+          "tags"  => g.tag_index,
+          "edge_cut" => skeleton.cuts_for(g.edges)
+        }
       end
 
       def node_body(id)

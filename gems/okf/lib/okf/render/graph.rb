@@ -33,6 +33,7 @@ module OKF
     class Graph
       TEMPLATE = File.expand_path("graph/template.html.erb", __dir__)
       LAYOUTS = %w[cose concentric breadthfirst circle grid].freeze
+      INIT_VIEWS = %w[graph index files catalog tags stats].freeze
 
       # Node-diameter range in px; the template scales within it by node degree.
       MIN_SIZE = 14
@@ -90,10 +91,13 @@ module OKF
       # simply turns the reduced first layout off.
       def initialize(graph, title: nil, link: nil, layout: "cose", node_endpoint: "node", meta_endpoint: "node/meta", embed: nil,
                      siblings: nil, self_slug: nil, hub_path: nil, search_endpoint: nil,
-                     manage_root: nil, manage_token: nil, cuts: nil, map: false)
+                     manage_root: nil, manage_token: nil, cuts: nil, map: false, init_view: nil,
+                     graphdata_endpoint: nil)
         @graph = graph
         @cuts = cuts
         @map = map
+        @init_view = init_view
+        @graphdata_endpoint = graphdata_endpoint
         @title = title
         @link = link
         @layout = layout
@@ -143,18 +147,18 @@ module OKF
       end
 
       def nodes_json
-        json_for_script(@graph.nodes)
+        @graphdata_endpoint ? json_for_script([]) : json_for_script(@graph.nodes)
       end
 
       def edges_json
-        json_for_script(@graph.edges)
+        @graphdata_endpoint ? json_for_script([]) : json_for_script(@graph.edges)
       end
 
       # Index-aligned with EDGES: `EDGE_CUT[i]` is the cut `EDGES[i]` survives.
       # An array of small integers rather than a keyed map, because keying it by
       # "source target" would cost more bytes than the edge list it annotates.
       def edge_cuts_json
-        json_for_script(@cuts)
+        @graphdata_endpoint ? json_for_script(nil) : json_for_script(@cuts)
       end
 
       # Whether the page opens in the Map view — every concept, boxed by the
@@ -165,14 +169,24 @@ module OKF
         json_for_script(@map ? true : false)
       end
 
+      # The view the page opens on when there is no ?view= deep link —
+      # null means graph (the default). Passed as a string the boot JS
+      # hands directly to setView/readIndex, so only valid rail names reach
+      # the call. `--map` is the canonical map boot state and takes
+      # precedence over any init_view setting; init_view covers the other
+      # five rails (index, files, catalog, tags, stats).
+      def init_view_json
+        json_for_script(@init_view.to_s.empty? ? nil : @init_view.to_s)
+      end
+
       # { type => [id, …] } — the client builds an id→type map for node colour.
       def types_json
-        json_for_script(@graph.type_index)
+        @graphdata_endpoint ? json_for_script({}) : json_for_script(@graph.type_index)
       end
 
       # { tag => [id, …] } — the client derives a node's tags and offers filters.
       def tags_json
-        json_for_script(@graph.tag_index)
+        @graphdata_endpoint ? json_for_script({}) : json_for_script(@graph.tag_index)
       end
 
       # The render-mode payload, or the literal `null` in server mode — both from
@@ -200,6 +214,14 @@ module OKF
       # of bundles to search, so the palette never offers concepts there.
       def search_endpoint_json
         json_for_script(@search_endpoint)
+      end
+
+      # The /graphdata endpoint, mount-relative — null when graph data is baked
+      # inline (the default). When set, the page boots with empty NODES/EDGES and
+      # fetches the real graph from this URL the first time the Graph rail is
+      # clicked. Allows the server to respond immediately on --view <non-graph>.
+      def graphdata_endpoint_json
+        json_for_script(@graphdata_endpoint)
       end
 
       # Behind a hub the mark is a link back to the bundle list — "../" reaches

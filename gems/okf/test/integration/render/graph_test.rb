@@ -659,6 +659,42 @@ class OKF::Render::GraphTest < OKF::TestCase
     refute_includes html, "a &lt;b&gt;bold&lt;/b&gt; claim", "the pre-escaped fragment is not baked"
   end
 
+  test "--view index renders the page with INIT_VIEW set to index" do
+    write("a.md", "---\ntype: Feature\ntitle: Alpha\n---\n\nhi\n")
+
+    html = render(init_view: "index")
+
+    assert_includes html, "const INIT_VIEW=\"index\";", "init_view is baked as INIT_VIEW"
+  end
+
+  test "default render has INIT_VIEW null — graph is the default boot" do
+    write("a.md", "---\ntype: Feature\ntitle: Alpha\n---\n\nhi\n")
+
+    html = render
+
+    assert_includes html, "const INIT_VIEW=null;", "no init_view means INIT_VIEW is null"
+  end
+
+  test "--view renders with empty NODES/EDGES and a GRAPHDATA_ENDPOINT for lazy load" do
+    write("a.md", "---\ntype: Feature\ntitle: Alpha\n---\n\nhi\n")
+    write("b.md", "---\ntype: Feature\ntitle: Beta\n---\n\n[Alpha](a.md)\n")
+
+    html = render(init_view: "index", graphdata_endpoint: "graphdata")
+
+    assert_includes html, "const GRAPHDATA_ENDPOINT=\"graphdata\";", "graphdata endpoint is baked"
+    assert_includes html, "const NODES=[], EDGES=[], TYPES={}, TAGS={};", "graph arrays are empty at boot"
+    assert_includes html, "loadGraphData", "lazy load function is present"
+  end
+
+  test "default render has GRAPHDATA_ENDPOINT null — graph inlined" do
+    write("a.md", "---\ntype: Feature\ntitle: Alpha\n---\n\nhi\n")
+
+    html = render
+
+    assert_includes html, "const GRAPHDATA_ENDPOINT=null;", "no graphdata endpoint by default"
+    assert_includes html, %("id":"a"), "nodes are inlined"
+  end
+
   private
 
   def render(**opts)

@@ -1246,6 +1246,10 @@ const SIBLINGS=<%= siblings_json %>, SELF_SLUG=<%= self_slug_json %>, HUB_PATH=<
 /* The hub's cross-bundle search, mount-relative — null for a standalone server
    and for `okf render`, where there is no set of bundles to search. */
 const SEARCH_ENDPOINT=<%= search_endpoint_json %>;
+/* /graphdata endpoint — null when graph data is baked inline (the default).
+   When set, the page boots with empty NODES/EDGES and populates the graph
+   lazily on the first visit to the Graph rail. */
+const GRAPHDATA_ENDPOINT=<%= graphdata_endpoint_json %>;
 /* The hub root, mount-relative — where the Bundles panel reads /bundles and
    posts /registry/<verb>. Null for a standalone server and for `okf render`,
    and that null is the gate: neither has a registry behind it, so neither ever
@@ -2242,12 +2246,68 @@ const inited={};
    only view absent here: it reads, it does not filter. */
 const SEARCH_PH={graph:'search concepts…',catalog:'search concepts…',files:'filter files…',tags:'search tags…'};
 function goToGraph(id){setView('graph');requestAnimationFrame(()=>select(id));}
+let _graphLoaded=!GRAPHDATA_ENDPOINT;
+let _graphLoading=null;
+/* The graph rail button — disabled with a loading label while /graphdata is
+   fetching and the layout is running, so the reader knows the work is in
+   progress and cannot trigger a second load. */
+const _graphRailBtn=document.querySelector('.rail-item[data-view="graph"]');
+function _graphLoadStart(){
+ if(!_graphRailBtn)return;
+ _graphRailBtn.disabled=true;
+ const lbl=_graphRailBtn.querySelector('.ri-lbl');
+ if(lbl)lbl.textContent='Loading…';
+ /* Show a centered message on the canvas so the reader knows why it is blank. */
+ const cy_el=document.getElementById('cy');
+ if(cy_el&&!cy_el.querySelector('.cy-loading')){
+  const msg=document.createElement('div');
+  msg.className='cy-loading';
+  msg.textContent='Building graph…';
+  msg.style.cssText='position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--muted);pointer-events:none;z-index:4';
+  cy_el.appendChild(msg);};}
+function _graphLoadEnd(){
+ if(!_graphRailBtn)return;
+ _graphRailBtn.disabled=false;
+ const lbl=_graphRailBtn.querySelector('.ri-lbl');
+ if(lbl)lbl.textContent='Graph';
+ const msg=document.getElementById('cy')&&document.getElementById('cy').querySelector('.cy-loading');
+ if(msg)msg.remove();}
+function loadGraphData(){
+ if(_graphLoaded)return Promise.resolve();
+ if(_graphLoading)return _graphLoading;
+ _graphLoadStart();
+ _graphLoading=fetch(GRAPHDATA_ENDPOINT).then(r=>r.json()).then(d=>{
+  /* Populate the module-level arrays so the rest of the page (filters, search,
+     stats, catalog links to nodes) all work exactly as if the data were inlined. */
+  NODES.push(...(d.nodes||[]));
+  EDGES.push(...(d.edges||[]));
+  Object.assign(TYPES,d.types||{});
+  Object.assign(TAGS,d.tags||{});
+  NODES.forEach(n=>{outL[n.id]=[];inL[n.id]=[];tagsOf[n.id]=[];});
+  EDGES.forEach(e=>{outL[e.source].push(e.target);inL[e.target].push(e.source);});
+  Object.entries(TYPES).forEach(([t,ids])=>ids.forEach(id=>typeOf[id]=t));
+  Object.entries(TAGS).forEach(([t,ids])=>ids.forEach(id=>{(tagsOf[id]=tagsOf[id]||[]).push(t);}));
+  const cuts=d.edge_cut||null;
+  const edgeEls2=(d.edges||[]).map((e,i)=>({data:{source:e.source,target:e.target,cut:(cuts&&cuts.length===(d.edges||[]).length?cuts[i]:0)}}));
+  cy.batch(()=>{
+   cy.add([...(d.nodes||[]).map(n=>({data:{id:n.id,title:n.title,c:color[typeOf[n.id]||'Untyped']||'#64748b',sz:szOf(n.id)}})),...edgeEls2]);
+   applyGraphFilter();});
+  /* Yield to the browser so the loading message paints before the layout
+     blocks the main thread. The layout itself is unavoidably synchronous for
+     the cose algorithm on large bundles. */
+  return new Promise(res=>setTimeout(res,0));
+ }).then(()=>{
+  cy.layout({name:'<%= @layout %>',animate:false,nodeRepulsion:9000,idealEdgeLength:170,padding:40,nodeOverlap:24,avoidOverlap:true,spacingFactor:1.2,nodeDimensionsIncludeLabels:true}).run();
+  _graphLoaded=true;
+  _graphLoadEnd();
+ }).catch(()=>{_graphLoading=null;_graphLoadEnd();});
+ return _graphLoading;}
 function setView(v){if(v===view)return;view=v;document.getElementById('app').setAttribute('data-view',v);
  railActive();ctlBadge();
  document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id==='view-'+v));
  const ph=SEARCH_PH[v];
  if(ph!==undefined){searchInput.placeholder=ph;searchInput.value=q[v]||'';}
- if(v==='graph')requestAnimationFrame(()=>cy.resize());
+ if(v==='graph'){requestAnimationFrame(()=>cy.resize());if(!_graphLoaded)loadGraphData();}
  if(v!=='graph')hello2();
  if(v==='catalog'&&!inited.catalog)initCatalog();
  if(v==='files'&&!inited.files)initFiles();
@@ -2298,6 +2358,7 @@ document.getElementById('hello2-x').addEventListener('click',hello2Done);
    which reads the rail) costs nothing now that `activeRail()` answers with the
    view it lands on — Files — so nothing has to invent a place for it to be. */
 document.querySelectorAll('.rail-item').forEach(b=>b.onclick=()=>{
+ if(b.disabled)return;
  if(b.dataset.view==='index')return readIndex();
  setView(b.dataset.view);});
 /* ── full-text search (MiniSearch, lazy) ──
@@ -2480,6 +2541,12 @@ function renderTree(list){const s=(q.files||'').toLowerCase();
  const el=document.getElementById('ftree-list');
  const ft=fileTypeCombo.get(), fg=fileTagCombo.get();const ids=ftMatch(q.files);
  const rows=ixOnly?[]:list.filter(c=>(!ft||c.type===ft)&&(!fg||c.tags.indexOf(fg)>=0)&&(ids?ids.has(c.id):(!s||(c.title+' '+c.id+' '+c.description).toLowerCase().includes(s))));
+ /* On the very first render, collapse every non-root directory so the tree
+    opens in a compact state and the reader expands only what they need. */
+ if(!renderTree._seeded){renderTree._seeded=true;
+  const allDirs=new Set();list.forEach(c=>{const d=dirOf(c.id);if(d!=='.')allDirs.add(d);
+   dirParents(d).forEach(pair=>{if(pair[0]!=='.')allDirs.add(pair[0]);allDirs.add(pair[1]);});});
+  allDirs.forEach(d=>collapsedDirs.add(d));}
  /* Reserved files carry neither a type nor tags, so either combo filtering is
     a statement about concepts and they step aside for it. */
  const res={};let resCount=0;
@@ -3577,8 +3644,16 @@ addEventListener('keydown',e=>{if(!dgv.hidden){if(e.key==='Escape')closeDiagram(
 const Q=new URLSearchParams(location.search),QL=Q.get('layout'),QS=Q.get('select');
 if(QL&&[...layoutSel.options].some(o=>o.value===QL)){layoutSel.value=QL;runLayout(QL);}
 const QV=Q.get('view');
+/* A ?view= query param always wins; INIT_VIEW is the --view boot default and
+   only applies when neither ?view= nor ?select= nor a hash anchors the page. */
+const INIT_VIEW=<%= init_view_json %>;
+/* When graph data is deferred, mark the Graph button as pending so the reader
+   knows it will load on first click rather than appear broken. */
+if(GRAPHDATA_ENDPOINT&&_graphRailBtn){_graphRailBtn.title='Graph (loads on first visit)';}
 if(QV==='index')readIndex();
 else if(QV&&document.querySelector('.rail-item[data-view="'+CSS.escape(QV)+'"]'))setView(QV);
+else if(!QV&&!QS&&!(location.hash.length>1)&&INIT_VIEW){if(INIT_VIEW==='index')readIndex();
+else if(document.querySelector('.rail-item[data-view="'+CSS.escape(INIT_VIEW)+'"]'))setView(INIT_VIEW);}
 /* Both of these name a *node*, so each has to carry the view with it: the page
    can now be standing on the index when one is read, and selecting into a graph
    nobody is looking at is a silent no-op. goToGraph on the graph is a no-op

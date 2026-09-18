@@ -158,13 +158,14 @@ module OKF
       # is refused outright with no flag that says otherwise — `--bind 0.0.0.0`
       # turns a personal tool into a public one, and the write surface does not
       # follow it there at all.
-      def initialize(bundles, layout: "cose", registry: nil, writable: false, map: false)
+      def initialize(bundles, layout: "cose", registry: nil, writable: false, map: false, init_view: nil)
         @bundles = bundles
         @default = bundles.first
         @boot_registry = registry
         @layout = layout
         @writable = writable
         @map = map
+        @init_view = init_view
         @apps = build_apps(layout)
       end
 
@@ -450,6 +451,7 @@ module OKF
             title: bundle.title,
             layout: layout,
             map: @map,
+            init_view: @init_view,
             siblings: siblings_of(bundle),
             self_slug: bundle.slug,
             hub_path: "/",
