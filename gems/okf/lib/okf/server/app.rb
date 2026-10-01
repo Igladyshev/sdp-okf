@@ -58,6 +58,13 @@ module OKF
       # hit and an in-page search rank alike instead of nearly alike.
       SEARCH_ENGINE = :index
 
+      # Bundles above this node count get an async graph build on the first
+      # /graphdata request. The response returns {status:"building"} immediately
+      # and the client polls /graphdata/status until the cache is populated.
+      # Lower = more bundles go async. Override with OKF_MAX_NODES_ASYNC env var
+      # to test thresholds without a code change.
+      MAX_NODES_ASYNC = (ENV.fetch("OKF_MAX_NODES_ASYNC", 500)).to_i
+
       # The /search payload, defined once because two hosts answer it: this one
       # bundle, or every bundle the hub hosts. The only difference is the corpus
       # handed in — and a nil slug drops the `slug` key from a row, so a
@@ -133,7 +140,8 @@ module OKF
         when "/types" then respond_json(graph.type_index)
         when "/index" then respond_json(directory_index)
         when "/log" then respond_json(logs)
-        when "/graphdata" then respond_json(graphdata)
+        when "/graphdata"        then respond_json(graphdata)
+        when "/graphdata/status"  then respond_json(graphdata_status)
         when "/search" then respond_json(self.class.search_payload(search_corpus, request.params["q"]))
         else not_found
         end
@@ -210,24 +218,38 @@ module OKF
       # would have inlined, plus edge_cut for the spine split.
       #
       # Served from a disk cache keyed by bundle fingerprint (max .md mtime).
-      # A cache hit skips the graph build entirely; a miss rebuilds, writes the
-      # cache, and memoizes the result in RAM for subsequent requests this run.
+      # A cache hit skips the graph build entirely. For bundles above MAX_NODES_ASYNC
+      # the build runs in a background thread and this endpoint returns
+      # {status:"building"} immediately so the request does not block.
       def graphdata
-        @graphdata ||= begin
-          if (cached = graph_cache.read)
-            cached
-          else
-            g = graph
-            payload = {
-              "nodes"    => g.nodes,
-              "edges"    => g.edges,
-              "types"    => g.type_index,
-              "tags"     => g.tag_index,
-              "edge_cut" => skeleton.cuts_for(g.edges)
-            }
-            graph_cache.write(payload)
-            payload
-          end
+        return @graphdata if @graphdata
+        if (cached = graph_cache.read)
+          return @graphdata = cached
+        end
+
+        # Quick node estimate via file count — cheaper than building the graph.
+        node_count = Dir.glob(File.join(@folder.root, "**", "*.md"))
+                        .count { |f| File.basename(f) != "index.md" }
+
+        if node_count > MAX_NODES_ASYNC
+          ensure_background_build(node_count)
+          { "status" => "building", "node_count" => node_count }
+        else
+          @graphdata = build_graphdata_payload
+        end
+      end
+
+      # Build status for large bundles. Returns the full payload merged under
+      # {status:"ready"} once the background thread has written the cache.
+      def graphdata_status
+        if (cached = graph_cache.read)
+          @graphdata = cached
+          return { "status" => "ready" }.merge(cached)
+        end
+        case @build_state
+        when :building then { "status" => "building", "node_count" => @build_node_count }
+        when :error    then { "status" => "error",    "message"    => @build_error }
+        else                { "status" => "pending" }
         end
       end
 
@@ -295,6 +317,38 @@ module OKF
 
       def respond(content_type, body)
         [ 200, { "content-type" => content_type }, [ body.to_s ] ]
+      end
+
+      # Start a background thread to build and cache the graph payload.
+      # Idempotent — subsequent calls while a build is running are no-ops.
+      def ensure_background_build(node_count)
+        return if @build_state
+        @build_state      = :building
+        @build_node_count = node_count
+        Thread.new do
+          begin
+            @graphdata   = build_graphdata_payload
+            @build_state = :ready
+          rescue => e
+            @build_error = e.message
+            @build_state = :error
+          end
+        end
+      end
+
+      # Build the full minimal graph payload and write it to disk cache.
+      # Used by both the sync path (small bundles) and the background thread.
+      def build_graphdata_payload
+        g = graph
+        payload = {
+          "nodes"    => g.nodes,
+          "edges"    => g.edges,
+          "types"    => g.type_index,
+          "tags"     => g.tag_index,
+          "edge_cut" => skeleton.cuts_for(g.edges)
+        }
+        graph_cache.write(payload)
+        payload
       end
 
       # Built on the first search and held for the life of the app, the way the

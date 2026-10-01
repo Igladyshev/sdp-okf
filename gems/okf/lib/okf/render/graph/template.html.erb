@@ -1549,6 +1549,13 @@ function resolveTarget(href,baseId){let p=href.split('#')[0].split('?')[0];if(!p
  if(/(^|\/)index\.md$/i.test(path))return {res:{kind:'index',dir:dirOfPath(path)}};
  if(/(^|\/)log\.md$/i.test(path))return {res:{kind:'log',path:path}};
  if(path===''||DIRSET.has(path))return {res:{kind:'index',dir:path===''?'.':path}};
+ /* When graph data is deferred (GRAPHDATA_ENDPOINT set) and hasn't loaded yet,
+    byId and DIRSET are both empty. Make a best-effort resolution:
+    - an explicit .md path → concept id (openFile fetches it live)
+    - a directory-style path (ends in / or no extension) → index for that dir */
+ if(GRAPHDATA_ENDPOINT&&!_graphLoaded&&path!==''){
+  if(/\.md$/i.test(path))return {id:id};
+  return {res:{kind:'index',dir:id===''?'.':id}};}
  return null;}
 function interceptMdLinks(container,baseIdOf,go,goRes){container.addEventListener('click',e=>{
  const a=e.target.closest('a');
@@ -2279,10 +2286,41 @@ function loadGraphData(){
  if(_graphLoaded)return Promise.resolve();
  if(_graphLoading)return _graphLoading;
  _graphLoadStart();
- /* Fetch graph data and cached layout positions in parallel. */
- const fetches=[fetch(GRAPHDATA_ENDPOINT).then(r=>r.json())];
- if(LAYOUTCACHE_ENDPOINT)fetches.push(fetch(LAYOUTCACHE_ENDPOINT).then(r=>r.json()).catch(()=>({positions:null})));
- _graphLoading=Promise.all(fetches).then(([d,lc])=>{
+ /* Fetch graph data; handle background-build response for large bundles. */
+ _graphLoading=fetch(GRAPHDATA_ENDPOINT)
+  .then(r=>r.json())
+  .then(d=>{
+   if(d.status==='building'){
+    /* Large bundle — server is building the graph in the background.
+       Show an informative overlay and poll /graphdata/status every 3s. */
+    const cyEl=document.getElementById('cy');
+    const msg=cyEl&&cyEl.querySelector('.cy-loading');
+    const n=d.node_count?' ('+d.node_count.toLocaleString()+' nodes)':'';
+    if(msg)msg.textContent='Building graph in background'+n+'…';
+    return new Promise((resolve,reject)=>{
+     const tid=setInterval(()=>{
+      fetch(GRAPHDATA_ENDPOINT+'/status')
+       .then(r=>r.json())
+       .then(s=>{
+        if(s.status==='ready'){clearInterval(tid);resolve(s);}
+        else if(s.status==='error'){
+         clearInterval(tid);
+         if(msg)msg.textContent='Graph build failed: '+(s.message||'unknown error');
+         reject(new Error(s.message));}
+       })
+       .catch(()=>{}); /* ignore transient network errors during polling */
+     },3000);
+    });
+   }
+   return d; /* small bundle: already the full payload */
+  })
+  .then(d=>{
+   /* Fetch layout cache now that we have the graph payload. */
+   const fetches=[Promise.resolve(d)];
+   if(LAYOUTCACHE_ENDPOINT)fetches.push(fetch(LAYOUTCACHE_ENDPOINT).then(r=>r.json()).catch(()=>({positions:null})));
+   return Promise.all(fetches);
+  })
+  .then(([d,lc])=>{
   const cachedPositions=(lc&&lc.positions&&Object.keys(lc.positions).length)?lc.positions:null;
   /* Update canvas message now that we know whether positions are cached. */
   const cyMsg=document.getElementById('cy')&&document.getElementById('cy').querySelector('.cy-loading');
@@ -2293,7 +2331,8 @@ function loadGraphData(){
   EDGES.push(...(d.edges||[]));
   Object.assign(TYPES,d.types||{});
   Object.assign(TAGS,d.tags||{});
-  NODES.forEach(n=>{outL[n.id]=[];inL[n.id]=[];tagsOf[n.id]=[];});
+  NODES.forEach(n=>{outL[n.id]=[];inL[n.id]=[];tagsOf[n.id]=[];byId[n.id]=n;
+   const parts=n.id.split('/');for(let i=1;i<parts.length;i++)DIRSET.add(parts.slice(0,i).join('/'));});
   EDGES.forEach(e=>{outL[e.source].push(e.target);inL[e.target].push(e.source);});
   Object.entries(TYPES).forEach(([t,ids])=>ids.forEach(id=>typeOf[id]=t));
   Object.entries(TAGS).forEach(([t,ids])=>ids.forEach(id=>{(tagsOf[id]=tagsOf[id]||[]).push(t);}));
