@@ -158,7 +158,7 @@ module OKF
       # is refused outright with no flag that says otherwise — `--bind 0.0.0.0`
       # turns a personal tool into a public one, and the write surface does not
       # follow it there at all.
-      def initialize(bundles, layout: "cose", registry: nil, writable: false, map: false, init_view: nil)
+      def initialize(bundles, layout: "cose", registry: nil, writable: false, map: false, init_view: "index")
         @bundles = bundles
         @default = bundles.first
         @boot_registry = registry

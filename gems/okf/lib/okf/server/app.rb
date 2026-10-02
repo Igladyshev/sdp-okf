@@ -97,7 +97,7 @@ module OKF
       # default would have pointed its palette at the host's root instead. The
       # route answers either way — advertising it is the caller's call.
       def initialize(folder, title: nil, link: nil, layout: "cose", siblings: nil, self_slug: nil, hub_path: nil,
-                     search_endpoint: nil, manage_root: nil, manage_token: nil, map: false, init_view: nil)
+                     search_endpoint: nil, manage_root: nil, manage_token: nil, map: false, init_view: "index")
         @folder = folder
         @title = title
         @link = link
@@ -110,6 +110,7 @@ module OKF
         @search_endpoint = search_endpoint
         @manage_root = manage_root
         @manage_token = manage_token
+        warm_graph_cache
       end
 
       # Build the search index now rather than on the first reader's keystroke.
@@ -360,6 +361,20 @@ module OKF
 
       def graph_cache
         @graph_cache ||= OKF::Bundle::GraphCache.new(@folder.root)
+      end
+
+      # Kick off the graph cache build at server startup so it is ready (or
+      # building) before the reader navigates to the Graph rail. Idempotent:
+      # a valid disk cache is a no-op; a running build is also a no-op.
+      def warm_graph_cache
+        return if graph_cache.read
+        node_count = Dir.glob(File.join(@folder.root, "**", "*.md"))
+                        .count { |f| File.basename(f) != "index.md" }
+        if node_count > MAX_NODES_ASYNC
+          ensure_background_build(node_count)
+        else
+          Thread.new { build_graphdata_payload rescue nil }
+        end
       end
 
       # Layout cache: { "positions" => { id => {x,y} }, "fingerprint" => int }

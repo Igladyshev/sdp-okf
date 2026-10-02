@@ -2264,6 +2264,23 @@ let _graphLoading=null;
    fetching and the layout is running, so the reader knows the work is in
    progress and cannot trigger a second load. */
 const _graphRailBtn=document.querySelector('.rail-item[data-view="graph"]');
+/* Floating toast that appears after TOAST_DELAY_MS when a large background
+   build is in progress — visible from any view, self-dismissing on completion. */
+const TOAST_DELAY_MS=5000;
+const _buildToast=(()=>{
+ const el=document.createElement('div');
+ el.style.cssText='display:none;position:fixed;bottom:16px;right:16px;background:var(--surface,#fff);border:1px solid var(--border,#ddd);border-radius:6px;padding:10px 16px;font-size:12px;color:var(--fg,#222);z-index:200;max-width:360px;box-shadow:0 2px 8px rgba(0,0,0,.18);align-items:center;gap:8px';
+ const span=document.createElement('span');
+ const btn=document.createElement('button');btn.textContent='✕';btn.title='Dismiss';
+ btn.style.cssText='border:none;background:none;cursor:pointer;color:var(--muted,#888);font-size:14px;padding:0 0 0 8px;line-height:1;flex-shrink:0';
+ btn.onclick=()=>{el.style.display='none';clearTimeout(_buildToast._tid);};
+ el.appendChild(span);el.appendChild(btn);document.body.appendChild(el);
+ return{
+  show(msg){span.textContent=msg;el.style.display='flex';},
+  hide(){el.style.display='none';clearTimeout(_buildToast._tid);},
+  schedule(msg,ms){clearTimeout(_buildToast._tid);_buildToast._tid=setTimeout(()=>_buildToast.show(msg),ms);}
+ };
+})();
 function _graphLoadStart(cached){
  if(!_graphRailBtn)return;
  _graphRailBtn.disabled=true;
@@ -2281,7 +2298,9 @@ function _graphLoadStart(cached){
  const lbl=_graphRailBtn.querySelector('.ri-lbl');
  if(lbl)lbl.textContent='Graph';
  const msg=document.getElementById('cy')&&document.getElementById('cy').querySelector('.cy-loading');
- if(msg)msg.remove();}
+ if(msg)msg.remove();
+ _buildToast.hide();
+}
 function loadGraphData(){
  if(_graphLoaded)return Promise.resolve();
  if(_graphLoading)return _graphLoading;
@@ -2292,11 +2311,13 @@ function loadGraphData(){
   .then(d=>{
    if(d.status==='building'){
     /* Large bundle — server is building the graph in the background.
-       Show an informative overlay and poll /graphdata/status every 3s. */
+       Show an informative overlay and poll /graphdata/status every 3s.
+       Schedule a toast in case the reader navigates away from the Graph rail. */
     const cyEl=document.getElementById('cy');
     const msg=cyEl&&cyEl.querySelector('.cy-loading');
     const n=d.node_count?' ('+d.node_count.toLocaleString()+' nodes)':'';
     if(msg)msg.textContent='Building graph in background'+n+'…';
+    _buildToast.schedule('Graph building in background'+n+'. You can keep reading — it will be ready when you navigate to Graph.',TOAST_DELAY_MS);
     return new Promise((resolve,reject)=>{
      const tid=setInterval(()=>{
       fetch(GRAPHDATA_ENDPOINT+'/status')

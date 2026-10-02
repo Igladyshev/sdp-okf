@@ -24,7 +24,7 @@ module OKF
         require "okf/server/app"
         require "rack/deflater"
 
-        options = { port: 8808, bind: "127.0.0.1", title: nil, link: nil, layout: "cose", read_only: false, map: false, init_view: nil }
+        options = { port: 8808, bind: "127.0.0.1", title: nil, link: nil, layout: "cose", read_only: false, map: false, init_view: "index" }
         parser = OptionParser.new do |o|
           o.banner = "Usage: okf server [DIR|@slug…] [-p PORT] [--bind ADDR] [--layout NAME] [-t title] [-l url]"
           o.on("-p", "--port PORT", Integer, "port to serve on (default #{options[:port]})") { |v| options[:port] = v }
@@ -70,22 +70,11 @@ module OKF
         # elsewhere passes its own.
         app = OKF::Server::App.new(folder, title: options[:title] || folder.name, link: options[:link],
           layout: options[:layout], search_endpoint: "search", map: options[:map], init_view: options[:init_view])
-        # minimal: the banner wants a count, not bodies — and Folder#graph is not
-        # memoized, so a full build here parses every concept a second time (the
-        # App builds its own) purely to print one number.
-        #
-        # When --view is set the server opens on a non-graph panel, so skip the
-        # eager warm_search and the banner count (both scan every concept) and
-        # let those costs land on the first request that actually needs them.
-        # The server is reachable immediately and the graph loads when the reader
-        # navigates to it.
-        unless options[:init_view]
-          app.warm_search
-          count = folder.graph(minimal: true).nodes.size
-          @out.puts "serving #{count} #{pluralize(count, "concept")} at http://#{options[:bind]}:#{options[:port]} (Ctrl-C to stop)"
-        else
-          @out.puts "serving #{folder.name} at http://#{options[:bind]}:#{options[:port]} (Ctrl-C to stop)"
-        end
+        # Graph data loads lazily on the first /graphdata request; skip the
+        # expensive graph parse at startup and estimate from file count instead.
+        est = Dir.glob(File.join(folder.root, "**", "*.md"))
+                 .count { |f| File.basename(f) != "index.md" }
+        @out.puts "serving ~#{est} #{pluralize(est, "concept")} at http://#{options[:bind]}:#{options[:port]} (graph loads lazily — Ctrl-C to stop)"
         serve(app, options)
       end
 
